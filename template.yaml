@@ -1,0 +1,123 @@
+Transform: AWS::Serverless-2016-10-31
+AWSTemplateFormatVersion: 2010-09-09
+Description: "This template is for deploying resources to integrate a Lambda function with a Redpanda cloud deployment"
+Parameters:
+  Prefix:
+    Description: "Prefix to be added to all the resources name for tracking purposes"
+    Type: String
+    MinLength: 2
+    MaxLength: 20
+  BootStrapServerURL:
+    Description: "Bootstrap Server URL"
+    Type: String
+  TopicName:
+    Description: "Topic Name"
+    Type: String
+  UserName:
+    Description: "Username used to access Redpanda"
+    Type: String
+    MinLength: 8
+    MaxLength: 30
+  Password:
+    Description: "Password used to access Redpanda"
+    Type: String
+    MinLength: 8
+    MaxLength: 30
+
+Resources:
+# Define the role for our Lambda function
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      #RoleName: !Select [0, [!Join ['-', [!Ref Prefix, 'custom-lambda-function-role']]]]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: !Sub
+            - '${Prefix}-LambdaRedpandaPolicy'
+            - Prefix: !Ref Prefix
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                - "ec2:DescribeNetworkInterfaces"
+                - "ec2:CreateNetworkInterface"
+                - "ec2:DeleteNetworkInterface"
+                - "ec2:AssignPrivateIpAddresses"
+                - "ec2:UnassignPrivateIpAddresses"
+                - "ec2:DescribeSecurityGroups"
+                - "ec2:DescribeSubnets"
+                - "ec2:DescribeVpcs"
+                Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:*'
+              - Effect: Allow
+                Action:
+                - "secretsmanager:GetSecretValue"
+                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:*'
+        - PolicyName: BasicExecutionRole
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action: logs:CreateLogGroup
+              Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+            - Effect: Allow
+              Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              Resource: !Sub 
+                - 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${functionName}:*'
+                - functionName: !Select [0, [!Join ['-', [!Ref Prefix, Redpanda-Event-Processor]]]]
+
+  RedpandaEventProcessor:
+    Type: AWS::Serverless::Function 
+    DependsOn:
+      - UserNamePasswordSecret
+    Properties:
+      FunctionName: !Select [0, [!Join ['-', [!Ref Prefix, Redpanda-Event-Processor]]]]
+      InlineCode: |
+          import json
+          def lambda_handler(event, context):
+              print('## EVENT') 
+              print(event)
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Event received from Redpanda!')
+              }
+      Timeout: 60
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Role: !GetAtt LambdaRole.Arn
+      Events:
+        SelfManagedKafkaEvent:
+            Type: SelfManagedKafka
+            Properties:
+                Enabled: true
+                KafkaBootstrapServers:
+                    - !Ref BootStrapServerURL
+                SourceAccessConfigurations: 
+                    - Type: SASL_SCRAM_256_AUTH
+                      URI: !Ref UserNamePasswordSecret
+                Topics:
+                    - !Ref TopicName
+
+# Secrets Manager Secrets
+  UserNamePasswordSecret:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Name: pandacredentials
+      KmsKeyId: "alias/aws/secretsmanager"
+      Description: "Username and password key pairs for Redpanda access"
+      SecretString: !Join [ '', ['{"username":"',!Ref UserName,'","password":"',!Ref Password,'"}'] ]
+
+Outputs:
+  RedpandaEventProcessor:
+    Value: !Ref RedpandaEventProcessor
+
